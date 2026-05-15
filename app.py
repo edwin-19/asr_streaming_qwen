@@ -11,11 +11,11 @@ from qwen_asr import Qwen3ASRModel
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.asr_model = Qwen3ASRModel.LLM(
-        # 'assets/qwen3-asr-finetuning-out-v3/checkpoint-727/', 
-        'weights/qwen3-asr-finetuning-out-v2/checkpoint-2908', 
+        'assets/qwen3-asr-finetuning-out-v3/checkpoint-727/', 
+        # 'weights/qwen3-asr-finetuning-out-v2/checkpoint-2908', 
         max_inference_batch_size=2,
         gpu_memory_utilization=0.8,
-        max_model_len=4096,
+        max_model_len=8192,
         forced_aligner="assets/Qwen3-ForcedAligner-0.6B",
         forced_aligner_kwargs=dict(
             dtype=torch.bfloat16,

@@ -118,10 +118,10 @@ async def main(
 async def run_stream(
     dataset_path: str = typer.Option("./data/seame_dev_sge"),
     base_url: str = typer.Option("http://localhost:8000/stream"),
-    num_samples: int = typer.Option(2)
+    num_samples: int = typer.Option(7), 
+    chunk_size: float = typer.Option(1.0) # Reduced for better "streaming" feel
 ):
-    # 1. Load and Prepare Data
-    # cast_column ensures we aren't sending weird sample rates to the server
+    # --- 1. Load and Prepare Data ---
     ds = load_dataset(dataset_path)['test']
     
     stacked_audio = []
@@ -129,27 +129,30 @@ async def run_stream(
     
     for i in range(min(num_samples, len(ds))):
         example = ds[i]
-        stacked_audio.append(example["context"]["array"].astype(np.float32))
-        raw_gt = example.get("answer") or example.get("text") or ""
-        ground_truths.append(normalize_mixed_text(raw_gt))
+        # Ensure we are working with 16k float32
+        audio_data = example["context"]["array"].astype(np.float32)
+        stacked_audio.append(audio_data)
+        raw_gt = example.get("answer") or ""
+        ground_truths.append(raw_gt)
     
     full_audio = np.concatenate(stacked_audio)
     full_gt = " ".join(ground_truths).strip()
+    full_gt = normalize_mixed_text(full_gt)
     
     # --- 2. SETUP ---
     SAMPLE_RATE = 16000
-    CHUNK_DURATION = 0.5 
-    SAMPLES_PER_CHUNK = int(SAMPLE_RATE * CHUNK_DURATION)
+    SAMPLES_PER_CHUNK = int(SAMPLE_RATE * chunk_size)
     total_chunks = len(full_audio) // SAMPLES_PER_CHUNK
     latencies = []
 
-    print(f"🚀 Starting Word-Level Stream: {len(full_audio)/SAMPLE_RATE:.2f}s audio")
-    print(f"📦 Total Chunks: {total_chunks} | Chunk size: {CHUNK_DURATION}s")
+    print(f"🚀 Starting Stream: {len(full_audio)/SAMPLE_RATE:.2f}s audio")
+    print(f"📦 Chunks: {total_chunks} | Size: {chunk_size}s")
     print("-" * 60)
 
-    # --- 3. STREAMING ---
-    with httpx.Client(base_url=base_url, timeout=30.0) as client:
+    # --- 3. STREAMING LOOP ---
+    with httpx.Client(base_url=base_url, timeout=60.0) as client:
         try:
+            # Initialize Session
             session_id = client.post("/start").json()["session_id"]
         except Exception as e:
             print(f"❌ Connection Error: {e}")
@@ -161,6 +164,7 @@ async def run_stream(
             
             req_start = time.perf_counter()
             try:
+                # Send raw float32 bytes
                 resp = client.post(
                     "/chunk", 
                     params={"session_id": session_id}, 
@@ -170,42 +174,36 @@ async def run_stream(
                 latencies.append(time.perf_counter() - req_start)
                 
                 data = resp.json()
-                # POLISH: Updated key to 'words' to match server-side interpolation
-                words = data.get("words", [])
+                current_text = data.get("text", "")
                 
-                # Dynamic terminal display
-                if words:
-                    # Show the 3 most recent words appearing in the stream
-                    recent = words[-3:]
-                    # Using 'word' and 'start' keys from the new JSON format
-                    display = " | ".join([f"{w['word']} ({w['start']:.1f}s)" for w in recent])
-                    print(f"\r[{i+1:03d}/{total_chunks}] {latencies[-1]*1000:4.0f}ms >> {display:<50}", end="", flush=True)
-                else:
-                    print(f"\r[{i+1:03d}/{total_chunks}] {latencies[-1]*1000:4.0f}ms >> ...{' ':<50}", end="", flush=True)
+                # Dynamic terminal display (During streaming, we only have partial text)
+                # Aligned words only come back in the /finish call
+                print(f"\r[{i+1:03d}/{total_chunks}] {latencies[-1]*1000:4.0f}ms >> {current_text[-50:]:<50}", end="", flush=True)
                 
             except Exception as e:
                 print(f"\n⚠️ Stream interrupted at chunk {i}: {e}")
                 break
             
-            # Real-time simulation: Sleep if processing was faster than chunk duration
-            time.sleep(max(0, CHUNK_DURATION - (time.perf_counter() - req_start)))
+            # Real-time simulation
+            time.sleep(max(0, chunk_size - (time.perf_counter() - req_start)))
 
-        # --- 4. FINALIZATION & METRICS ---
+        # --- 4. FINALIZATION (WHERE ALIGNMENT HAPPENS) ---
         print("\n" + "="*60)
+        print("⌛ Finalizing stream and running forced aligner...")
+        
         final_resp = client.post("/finish", params={"session_id": session_id})
         final_data = final_resp.json()
         
-        # POLISH: Pretty-print the raw JSON for research audit
-        print(f"🔍 RAW JSON AUDIT:\n{json.dumps(final_data, indent=2, ensure_ascii=False)}")
-        print("-" * 60)
-
-        final_pred = normalize_mixed_text(final_data.get("text", "")).strip()
-        final_words = final_data.get("words", [])
+        # Extract fields based on your specific JSON response
+        final_pred = normalize_mixed_text(final_data.get("text", "").strip())
+        # Accessing the nested 'items' list
+        alignment_data = final_data.get("alignment", {})
+        word_items = alignment_data.get("items", [])
         
         audio_dur = len(full_audio) / SAMPLE_RATE
         rtf = sum(latencies) / audio_dur
         
-        # Accuracy Calculation
+        # Accuracy Calculation (CER)
         try:
             error_rate = cer([full_gt], [final_pred]) if full_gt and final_pred else 1.0
         except Exception:
@@ -216,15 +214,24 @@ async def run_stream(
         print(f"CER:    {error_rate:.2%}")
         print("-" * 60)
         
-        print("🕒 WORD-LEVEL TIMELINE (Binned to 0.5s windows):")
-        for w in final_words:
-            print(f"  [{w['start']:5.2f}s - {w['end']:5.2f}s] : {w['word']}")
+        print("🕒 WORD-LEVEL TIMELINE (Forced Alignment):")
+        # Displaying first 30 tokens/words
+        for item in word_items[:30]:
+            t_text = item.get("text", "???")
+            t_start = item.get("start_time", 0.0)
+            t_end = item.get("end_time", 0.0)
+            
+            # Formatting: align text to the left, timestamps to the right
+            print(f"  [{t_start:5.2f}s -> {t_end:5.2f}s] : {t_text}")
+        
+        if len(word_items) > 30:
+            print(f"  ... and {len(word_items) - 30} more tokens.")
             
         print("-" * 60)
         print(f"PRED: {final_pred}")
         print(f"GT:   {full_gt}")
         print("="*60)
-
+        
 @app.async_command()
 async def align_text(
     dataset_path: str = typer.Option("./data/seame_dev_sge"),
@@ -250,12 +257,11 @@ async def align_text(
 async def run_ws_stream(
     dataset_path: str = typer.Option("./data/seame_dev_sge"),
     ws_url: str = typer.Option("ws://localhost:8000/ws/transcribe"),
-    num_samples: int = typer.Option(10)
+    num_samples: int = typer.Option(10),
+    chunk_size: float = typer.Option(0.5)
 ):
-    # 1. Load and Prepare Stacked Audio
-    # Ensure consistent 16kHz for timing math
+    # --- 1. Data Preparation ---
     ds = load_dataset(dataset_path)['test']
-    
     indices = random.sample(range(len(ds)), min(num_samples, len(ds)))
     samples = ds.select(indices)
     
@@ -263,77 +269,95 @@ async def run_ws_stream(
     all_gt = []
     for feat in samples:
         all_audio.append(feat["context"]["array"].astype(np.float32))
-        # Handle field naming variations in SEAME
-        raw_gt = feat.get("answer") or feat.get("text") or ""
+        raw_gt = feat.get("answer") or ""
         all_gt.append(normalize_mixed_text(raw_gt))
         
     full_audio = np.concatenate(all_audio)
     full_gt = " ".join(all_gt).strip()
     
-    # --- Configuration ---
     SAMPLE_RATE = 16000
-    CHUNK_SEC = 0.5
-    SAMPLES_PER_CHUNK = int(SAMPLE_RATE * CHUNK_SEC)
+    SAMPLES_PER_CHUNK = int(SAMPLE_RATE * chunk_size)
     total_chunks = len(full_audio) // SAMPLES_PER_CHUNK
     total_audio_dur = len(full_audio) / SAMPLE_RATE
     
-    print(f"Streaming {num_samples} samples | Total Audio: {total_audio_dur:.2f}s")
+    print(f"🚀 Streaming {num_samples} samples | Total Audio: {total_audio_dur:.2f}s")
     print("-" * 60)
 
+    # --- 2. Streaming Loop ---
     async with websockets.connect(ws_url) as websocket:
         latencies = []
         start_wall_clock = time.perf_counter()
-        
+        last_data = {}
+
         for i in range(total_chunks):
             loop_start = time.perf_counter()
             
-            # Audio Pointers
             start_idx = i * SAMPLES_PER_CHUNK
             chunk = full_audio[start_idx : start_idx + SAMPLES_PER_CHUNK]
-            current_audio_time = (i + 1) * CHUNK_SEC
             
-            # Send/Recv
+            # Send binary audio
             await websocket.send(chunk.tobytes())
+            
+            # Receive partial text (no words yet)
             response = await websocket.recv()
+            last_data = json.loads(response)
             
             latencies.append(time.perf_counter() - loop_start)
-            data = json.loads(response)
             
-            # Real-time Visuals
-            words = data.get("words", [])
-            recent_txt = " ".join([w['word'] for w in words[-3:]]) # Show last 3 words
-            percent = (current_audio_time / total_audio_dur) * 100
+            # UI: Show partial text recognition
+            current_text = last_data.get("text", "")
+            percent = ((i + 1) * chunk_size / total_audio_dur) * 100
+            print(f"\r[{percent:3.0f}%] >> {current_text[-50:]:<50}", end="", flush=True)
             
-            print(f"\r[{percent:3.0f}%] {current_audio_time:5.1f}s | {latencies[-1]*1000:4.0f}ms >> {recent_txt:<30}", end="", flush=True)
-            
-            # Real-time simulation (throttle to 0.5s chunks)
+            # Real-time simulation
             elapsed = time.perf_counter() - loop_start
-            await asyncio.sleep(max(0, CHUNK_SEC - elapsed))
+            await asyncio.sleep(max(0, chunk_size - elapsed))
 
-        # --- Final Metadata and Scoring ---
-        total_wall_time = time.perf_counter() - start_wall_clock
-        final_pred = normalize_mixed_text(data.get('text', ''))
-        final_words = data.get("words", [])
-        
-        # Calculate CER
-        error_rate = cer([full_gt], [final_pred]) if full_gt else 0.0
-
+        # --- 3. Finalization ---
         print("\n" + "="*60)
-        print(f"STACKED STREAM SUMMARY")
-        print("-" * 60)
-        print(f"Throughput RTF : {sum(latencies) / total_audio_dur:.4f}")
-        print(f"Accuracy CER   : {error_rate:.2%}")
-        print(f"Total Latency  : {sum(latencies):.2f}s for {total_audio_dur:.2f}s audio")
-        print("-" * 60)
+        print("⌛ Waiting for Forced Aligner results...")
         
-        # Optional: Print first/last few words with timestamps for verification
-        if final_words:
-            print("🕒 TIMELINE PREVIEW (First 5 tokens):")
-            for w in final_words[:5]:
-                print(f"  [{w['start']:5.2f}s - {w['end']:5.2f}s] : {w['word']}")
+        # We close the write-side or just wait for the server to finish 
+        # and send the 'is_final' packet.
+        # Note: In our current server logic, 'is_final' is triggered by Disconnect.
+        # To get the final JSON, we close and check the last buffered message 
+        # OR we modify the server to detect a 'DONE' signal.
         
+        # If server sends final JSON on Disconnect, some clients miss it.
+        # Let's assume server sends it right before the final 'try/except' in Disconnect.
+        await websocket.close()
+        
+        # Process metrics using the last text received
+        final_pred = normalize_mixed_text(last_data.get('text', ''))
+        
+        # Note: Since the server runs aligner on WebSocketDisconnect, 
+        # to actually SEE the words in this script, you would usually 
+        # send a 'end' string rather than just disconnecting.
+        
+        error_rate = cer([full_gt], [final_pred]) if full_gt else 0.0
+        word_items = last_data.get("words", [])
+        if word_items:
+            print(f"🕒 WORD-LEVEL TIMELINE ({len(word_items)} tokens):")
+            print("-" * 40)
+            for item in word_items:
+                # Handling our standardized keys: word, start, end
+                w = item.get("word", "???")
+                s = item.get("start", 0.0)
+                e = item.get("end", 0.0)
+                
+                # Highlight short vs long tokens visually
+                duration = e - s
+                bar = "█" * int(duration * 10) # 1 block per 100ms
+                
+                print(f"  [{s:6.2f}s -> {e:6.2f}s] | {w:<12} {bar}")
+        else:
+            print("⚠️ No alignment data received in final packet.")
+
+        print(f"📊 STACKED STREAM SUMMARY")
+        print(f"RTF:    {sum(latencies) / total_audio_dur:.4f}")
+        print(f"CER:    {error_rate:.2%}")
         print("-" * 60)
-        print(f"GT:   {full_gt[:100]}...") # Truncated for display
+        print(f"GT:   {full_gt[:100]}...")
         print(f"PRED: {final_pred[:100]}...")
         print("="*60)
 

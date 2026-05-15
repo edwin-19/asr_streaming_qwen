@@ -1,70 +1,81 @@
 import json
+import time
 import numpy as np
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
-import re
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 socket_router = APIRouter(prefix="/ws", tags=["socket-streaming-asr"])
-
-def update_fixed_window_metadata_ws(state, context):
-    full_text = getattr(state, "text", "") or ""
-    current_time = getattr(state, "chunk_id", 0) * 0.5
-    window_start = max(0, current_time - 0.5)
-
-    if full_text.startswith(context["confirmed_text"]):
-        new_blob = full_text[len(context["confirmed_text"]):].strip()
-    else:
-        new_blob = full_text
-        context["word_timestamps"] = []
-
-    if new_blob:
-        tokens = re.findall(r'[\u4e00-\u9fff]|[a-zA-Z0-9\']+', new_blob)
-        if tokens:
-            time_per = 0.5 / len(tokens)
-            for idx, token in enumerate(tokens):
-                context["word_timestamps"].append({
-                    "word": token,
-                    "start": round(window_start + (idx * time_per), 2),
-                    "end": round(window_start + ((idx + 1) * time_per), 2)
-                })
-        context["confirmed_text"] = full_text
-
-    return {
-        "text": full_text,
-        "words": context["word_timestamps"],
-        "current_time_pos": current_time,
-        "is_final": False
-    }
 
 @socket_router.websocket("/transcribe")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     asr = websocket.app.state.asr_model
     
-    # Initialize Qwen State
+    # 1. Initialize ASR Streaming State
     state = asr.init_streaming_state(
         unfixed_chunk_num=4,
         unfixed_token_num=5,
         chunk_size_sec=0.5,
     )
     
-    session_context = {
-        "confirmed_text": "",
-        "word_timestamps": []
-    }
+    # Buffer to accumulate raw audio for the forced aligner
+    audio_buffer = []
     
     try:
         while True:
+            # Receive binary audio chunk
             data = await websocket.receive_bytes()
             wav = np.frombuffer(data, dtype=np.float32).reshape(-1)
-            asr.streaming_transcribe(wav, state)
-            result = update_fixed_window_metadata_ws(state, session_context)
+            audio_buffer.append(wav)
             
-            await websocket.send_json(result)
+            # Streaming Inference (updates state.text)
+            asr.streaming_transcribe(wav, state)
+            
+            # Send partial text recognition to client
+            await websocket.send_json({
+                "text": getattr(state, "text", ""),
+                "is_final": False
+            })
             
     except WebSocketDisconnect:
-        # Handle cleanup on disconnect
+        # --- 2. Finalization & Forced Alignment ---
         asr.finish_streaming_transcribe(state)
-        final_result = update_fixed_window_metadata_ws(state, session_context)
-        final_result["is_final"] = True
-        print("WebSocket disconnected. Session finished.")
+        final_text = getattr(state, "text", "")
         
+        final_payload = {
+            "text": final_text,
+            "words": [],
+            "is_final": True
+        }
+
+        if final_text and audio_buffer:
+            try:
+                # Combine all buffered audio for the aligner
+                full_audio = np.concatenate(audio_buffer)
+                
+                # Perform the alignment
+                alignment_results = asr.forced_aligner.align(
+                    audio=(full_audio, 16000),
+                    text=final_text,
+                    language=getattr(state, "language", "en")
+                )
+                
+                # Extract and map items to our standard format
+                items = alignment_results[0].items if alignment_results else []
+                final_payload["words"] = [
+                    {
+                        "word": item.text,
+                        "start": item.start_time,
+                        "end": item.end_time
+                    } for item in items
+                ]
+            except Exception as e:
+                print(f"Forced alignment failed: {e}")
+        
+        # Send the finalized, aligned data
+        try:
+            await websocket.send_json(final_payload)
+        except Exception:
+            # Socket might already be fully closed by the client
+            pass
+            
+        print(f"WS session closed. Final text length: {len(final_text)}")

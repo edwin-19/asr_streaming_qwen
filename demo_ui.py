@@ -5,6 +5,8 @@ import json
 import asyncio
 
 WS_URL = "ws://localhost:8000/ws/transcribe"
+BUFFER_LIMIT_SEC = 5.0  # Keep 5 seconds of context for the model
+SAMPLE_RATE = 16000
 
 async def stream_transcribe(stream_state, new_chunk):
     if new_chunk is None:
@@ -12,56 +14,58 @@ async def stream_transcribe(stream_state, new_chunk):
 
     sr, y = new_chunk
     
-    # 1. Processing (Mono + Float32 + Normalization)
+    # 1. Processing (Mono + Float32)
     if y.ndim > 1:
         y = y.mean(axis=1)
     y = y.astype(np.float32)
     
-    if np.max(np.abs(y)) > 0:
-        y /= np.max(np.abs(y))
-
-    # 2. Connection Management (Websockets 15.x Style)
-    ws = stream_state.get("ws")
+    # 2. Accumulate in local Buffer
+    if "buffer" not in stream_state:
+        stream_state["buffer"] = y
+    else:
+        # Append new audio to existing buffer
+        stream_state["buffer"] = np.concatenate([stream_state["buffer"], y])
     
-    # In 15.x, we check if the connection exists and isn't closing/closed
-    is_connected = False
-    if ws is not None:
-        # Check if the connection state is OPEN
-        # The .state property is the most reliable way in 15.x
-        is_connected = hasattr(ws, 'state') and str(ws.state).split('.')[-1] == "OPEN"
+    # 3. Limit Buffer Size (Sliding Window)
+    # This ensures we don't send 10 minutes of audio at once, 
+    # but still give the model context.
+    max_samples = int(BUFFER_LIMIT_SEC * sr)
+    if len(stream_state["buffer"]) > max_samples:
+        stream_state["buffer"] = stream_state["buffer"][-max_samples:]
+
+    # 4. Connection Management (Websockets 15.x)
+    ws = stream_state.get("ws")
+    is_connected = ws is not None and hasattr(ws, 'state') and str(ws.state).split('.')[-1] == "OPEN"
 
     try:
         if not is_connected:
             stream_state["ws"] = await websockets.connect(WS_URL)
-            stream_state["transcript"] = ""
             ws = stream_state["ws"]
 
-        # 3. Send & Receive
-        await ws.send(y.tobytes())
+        # 5. Send the BUFFER, not just the chunk
+        # Sending the last 5 seconds helps Whisper 'catch up' on context
+        await ws.send(stream_state["buffer"].tobytes())
+        
         response = await ws.recv()
         data = json.loads(response)
         
-        # 4. Update and Return
-        stream_state["transcript"] = data.get("text", "")
+        # Only update if the server actually returned text
+        if data.get("text"):
+            stream_state["transcript"] = data["text"]
+            
         return stream_state, stream_state["transcript"]
 
     except Exception as e:
-        # If any socket error occurs, null it out so we reconnect on next chunk
         stream_state["ws"] = None
-        return stream_state, f"Reconnecting... ({str(e)})"
+        return stream_state, f"Buffer Syncing... ({str(e)})"
 
-# --- UI Setup ---
 with gr.Blocks() as demo:
-    state = gr.State(value={"ws": None, "transcript": ""})
+    # State now tracks the socket, the full transcript, and the audio buffer
+    state = gr.State(value={"ws": None, "transcript": "", "buffer": np.array([], dtype=np.float32)})
     
-    gr.Markdown("# 🚀 High-Speed ASR Stream")
-    gr.Markdown(f"Connected to: `{WS_URL}`")
-    
-    with gr.Row():
-        audio_input = gr.Audio(sources=["microphone"], streaming=True)
-        text_output = gr.Textbox(label="Live Transcript", interactive=False)
+    audio_input = gr.Audio(sources=["microphone"], streaming=True)
+    text_output = gr.Textbox(label="Live Transcription (5s Context Window)")
 
-    # Use a faster stream interval if your server can handle it (0.5s is default)
     audio_input.stream(
         fn=stream_transcribe,
         inputs=[state, audio_input],
@@ -69,5 +73,4 @@ with gr.Blocks() as demo:
         show_progress="hidden"
     )
 
-if __name__ == "__main__":
-    demo.launch(share=True)
+demo.launch()
