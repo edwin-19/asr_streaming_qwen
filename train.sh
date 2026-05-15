@@ -1,0 +1,13 @@
+python qwen3_asr_sft.py \
+  --model_path "Qwen/Qwen3-ASR-1.7B" \
+  --train_file "data/seame_train_qwen_asr.json" \
+  --output_dir "./qwen3-asr-finetuning-out-v3" \
+  --batch_size 16 \
+  --grad_acc 8 \
+  --lr 2e-5 \
+  --epochs 1 \
+  --warmup_ratio 0.1 \
+  --num_workers 16 \
+  --save_steps 300 \
+  --save_total_limit 2 \
+  --resume 1 

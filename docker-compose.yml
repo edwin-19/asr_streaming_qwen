@@ -1,0 +1,21 @@
+services:
+  qwen3-asr:
+    build: .
+    container_name: qwen3_asr_api
+    # Port mapping: [Your PC Port] : [Internal Container Port]
+    ports:
+      - "8000:8000"
+    # volumes:
+    #   # Volume mapping: [Your PC Folder] : [Internal Container Folder]
+    #   - "${HOST_MODELS_PATH}:/app/models"
+    # Load all variables into the container environment
+    # env_file:
+    #   - .env
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped

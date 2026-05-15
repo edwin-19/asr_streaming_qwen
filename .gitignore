@@ -1,0 +1,16 @@
+models/
+weights/
+data/
+assets/
+__pycache__/
+*.log
+*.ckpt
+*.h5
+*.pt
+*.onnx
+*.zip
+*.tar.gz
+*.tar
+*.csv
+.vscode
+.DS_Store
