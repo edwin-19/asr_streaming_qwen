@@ -8,6 +8,7 @@ soundfile
 numpy<2.0.0
 nagisa==0.2.11
 soynlp==0.0.493
+huggingface_hub[cli]
 # qwen-omni-utils
 # pytz
 # qwen-asr[vllm]
