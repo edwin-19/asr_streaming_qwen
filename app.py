@@ -13,8 +13,8 @@ import os
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.asr_model = Qwen3ASRModel.LLM(
-        'assets/qwen3-asr-finetuning-out-v3/checkpoint-727/', 
-        # 'weights/qwen3-asr-finetuning-out-v2/checkpoint-2908', 
+        # 'assets/qwen3-asr-finetuning-out-v3/checkpoint-727/', 
+        'weights/qwen3-asr-finetuning-out-v2/checkpoint-2908', 
         max_inference_batch_size=2,
         gpu_memory_utilization=0.8,
         max_model_len=8192,

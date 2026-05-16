@@ -71,3 +71,9 @@ docker compose up -d --build
 * **The 0.6B Advantage:** The 0.6B model achieves performance remarkably close to the 1.7B variant (only ~0.93% difference).
 * **Fine-tuning Impact:** Fine-tuning resulted in a **48.52%** relative error reduction for the 0.6B model.
 * **Mandarin Impact:** Mandarin prefers the usage of CER which is better than using WER but i added in just in case
+
+## 3. RTF Benchmark Results
+| Model | Sustained RTF | Starting RTF (Prefill) |
+| :--- | :---: | :---: |
+| **Qwen 3 ASR 1.7B** | 0.1 – 0.2 | 0.34 |
+| **Qwen 3 ASR 0.6B** | 0.04 – 0.05 | 0.28 |
