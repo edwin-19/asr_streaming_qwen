@@ -7,6 +7,8 @@ from routes.stream import stream_router
 from routes.socket import socket_router
 import torch
 from qwen_asr import Qwen3ASRModel
+from fastapi.responses import HTMLResponse
+import os
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -34,15 +36,16 @@ async def lifespan(app: FastAPI):
         app.state.asr_model.model.llm_engine.shutdown()
     torch.cuda.empty_cache()
 
-origins = ["*"]
 tags_metadata = [
     {"name": "transcribe", "description": "Calling the Qwen ASR Engine"},
 ]
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+TEMPLATE_DIR = os.path.join(BASE_DIR, "templates")
 
 app = FastAPI(lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -57,3 +60,9 @@ async def health():
     return {
         'status': 'ok'
     }
+    
+@app.get('/', response_class=HTMLResponse)
+async def get_ui():
+    html_path = os.path.join(TEMPLATE_DIR, "index.html")
+    with open(html_path, "r", encoding="utf-8") as f:
+        return HTMLResponse(content=f.read())
