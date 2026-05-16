@@ -35,6 +35,11 @@ python get_timestamp.py
 uvicorn app:app --host 0.0.0.0
 ```
 
+- Access the webui for websocket transciption
+```
+http://localhost:8000
+```
+
 - Run inference on server
 ```bash
 # Run main
