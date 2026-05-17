@@ -12,23 +12,30 @@ import os
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    model_path = os.getenv("ASR_MODEL_PATH", "weights/qwen3-asr-finetuning-out-v2/checkpoint-2908")
+    forced_aligner_path = os.getenv("FORCED_ALIGNER_PATH", "assets/Qwen3-ForcedAligner-0.6B")
+    
+    max_batch_size = int(os.getenv("ASR_MAX_BATCH_SIZE", "2"))
+    gpu_utilization = float(os.getenv("ASR_GPU_MEMORY_UTILIZATION", "0.8"))
+    max_model_len = int(os.getenv("ASR_MAX_MODEL_LEN", "8192"))
+    device = os.getenv("ASR_DEVICE", "cuda:0")
+    
     app.state.asr_model = Qwen3ASRModel.LLM(
-        # 'assets/qwen3-asr-finetuning-out-v3/checkpoint-727/', 
-        'weights/qwen3-asr-finetuning-out-v2/checkpoint-2908', 
-        max_inference_batch_size=2,
-        gpu_memory_utilization=0.8,
-        max_model_len=8192,
-        forced_aligner="assets/Qwen3-ForcedAligner-0.6B",
+        model_path, 
+        max_inference_batch_size=max_batch_size,
+        gpu_memory_utilization=gpu_utilization,
+        max_model_len=max_model_len,
+        forced_aligner=forced_aligner_path,
         forced_aligner_kwargs=dict(
             dtype=torch.bfloat16,
-            device_map="cuda:0",
-            # attn_implementation="flash_attention_2",
+            device_map=device,
+            # attn_implementation="flash_attention_2", # Optional: can also toggle via env if needed
         ),
     )
     
-    app.state.unfixed_chunk_num = 4
-    app.state.unfixed_token_num = 5
-    app.state.chunk_size_sec = 1.0
+    app.state.unfixed_chunk_num = int(os.getenv("ASR_UNFIXED_CHUNK_NUM", "4"))
+    app.state.unfixed_token_num = int(os.getenv("ASR_UNFIXED_TOKEN_NUM", "5"))
+    app.state.chunk_size_sec = float(os.getenv("ASR_CHUNK_SIZE_SEC", "1.0"))
     
     yield
     # SHUTDOWN: Clean up vLLM
@@ -38,6 +45,8 @@ async def lifespan(app: FastAPI):
 
 tags_metadata = [
     {"name": "transcribe", "description": "Calling the Qwen ASR Engine"},
+    {"name": "streaming-asr", "description": "Streaming Endpoint Functionality"},
+    {"name": "socket-streaming-asr", "description": "Socket ASR Endpoint"},
 ]
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE_DIR = os.path.join(BASE_DIR, "templates")

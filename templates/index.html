@@ -7,10 +7,13 @@
         .container { max-width: 600px; margin: 0 auto; padding: 20px; background: white; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
         button { padding: 10px 20px; font-size: 16px; cursor: pointer; border-radius: 4px; border: none; margin-right: 10px; }
         #startBtn { background: #28a745; color: white; }
+        #startBtn:disabled { background: #cccccc; cursor: not-allowed; }
         #stopBtn { background: #dc3545; color: white; }
+        #stopBtn:disabled { background: #cccccc; cursor: not-allowed; }
         #clearBtn { background: #ffc107; color: white; }
         #status { font-weight: bold; margin: 20px 0; color: #666; }
-        #transcript { padding: 15px; background: #eee; border-radius: 4px; min-height: 50px; font-family: monospace; }
+        #transcript { padding: 15px; background: #eee; border-radius: 4px; min-height: 50px; font-family: monospace; margin-bottom: 20px; }
+        .word-timeline { font-family: monospace; font-size: 14px; background: #1e1e1e; color: #a9ffb4; padding: 15px; border-radius: 4px; display: none; }
     </style>
 </head>
 <body>
@@ -18,12 +21,15 @@
 <div class="container">
     <h2>🎙️ Live WS Transcription</h2>
     <button id="startBtn">Start Streaming</button>
-    <button id="stopBtn" disabled>Stop</button>
+    <button id="stopBtn" disabled>Stop & Align</button>
     <button id="clearBtn">Clear Text</button>
     
     <div id="status">Status: Disconnected</div>
     <h3>Transcript:</h3>
     <div id="transcript">...</div>
+
+    <h3 id="timelineHeader" style="display:none;">⏱️ Word-Level Timeline:</h3>
+    <div id="timeline" class="word-timeline"></div>
 </div>
 
 <script>
@@ -37,17 +43,26 @@
     const statusEl = document.getElementById('status');
     const transcriptEl = document.getElementById('transcript');
     const clearBtn = document.getElementById('clearBtn');
+    const timelineEl = document.getElementById('timeline');
+    const timelineHeader = document.getElementById('timelineHeader');
 
     const WS_URL = 'ws://localhost:8000/ws/transcribe';
     const SAMPLE_RATE = 16000;
 
     clearBtn.onclick = () => {
-        transcriptEl.innerText = '';
+        transcriptEl.innerText = '...';
+        timelineEl.innerHTML = '';
+        timelineEl.style.display = 'none';
+        timelineHeader.style.display = 'none';
     };
 
     startBtn.onclick = async () => {
         try {
-            // Initialize WebSocket
+            timelineEl.style.display = 'none';
+            timelineHeader.style.display = 'none';
+            timelineEl.innerHTML = '';
+
+            // Initialize WebSocket Connection
             socket = new WebSocket(WS_URL);
             socket.binaryType = 'arraybuffer';
 
@@ -59,26 +74,54 @@
 
             socket.onmessage = (event) => {
                 const data = JSON.parse(event.data);
+                
                 if (data.text) {
                     transcriptEl.innerText = data.text;
+                }
+
+                // --- FIX: Catch the final alignment packet ---
+                if (data.is_final) {
+                    statusEl.textContent = "Status: Processing complete.";
+                    if (data.words && data.words.length > 0) {
+                        timelineHeader.style.display = 'block';
+                        timelineEl.style.display = 'block';
+                        
+                        let timelineHtml = '';
+                        data.words.forEach(item => {
+                            const duration = (item.end - item.start).toFixed(2);
+                            const blocks = "█".repeat(Math.max(1, Math.floor(duration * 10)));
+                            timelineHtml += `[${item.start.toFixed(2)}s -> ${item.end.toFixed(2)}s] | ${item.word.padEnd(12, ' ')} ${blocks}\n`;
+                        });
+                        timelineEl.innerText = timelineHtml;
+                    }
+                    // Let the socket close cleanly now that we have data
+                    socket.close();
                 }
             };
 
             socket.onclose = () => {
-                statusEl.textContent = "Status: Disconnected";
+                if (statusEl.textContent.includes("Listening")) {
+                    statusEl.textContent = "Status: Disconnected";
+                }
                 cleanup();
             };
 
+            // Access user microphone
             mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            audioContext = new AudioContext({ sampleRate: SAMPLE_RATE });
+            audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
             const source = audioContext.createMediaStreamSource(mediaStream);
 
+            // Buffer size 4096 frames, 1 input channel, 1 output channel
             processor = audioContext.createScriptProcessor(4096, 1, 1);
+            
             processor.onaudioprocess = (e) => {
-                if (socket.readyState !== WebSocket.OPEN) return;
+                if (!socket || socket.readyState !== WebSocket.OPEN) return;
+                
                 const inputData = e.inputBuffer.getChannelData(0);
-                const audioBytes = inputData.buffer;
-                socket.send(audioBytes);
+                
+                // --- FIX: Explicitly copy Float32 content out into clean bytes ---
+                const cleanBuffer = new Float32Array(inputData);
+                socket.send(cleanBuffer.buffer);
             }
 
             source.connect(processor);
@@ -87,20 +130,37 @@
         } catch (err) {
             console.error('Error accessing microphone:', err);
             statusEl.textContent = "Error: " + err.message;
+            cleanup();
         }
     };
 
+    // --- FIX: Inverted Handshake logic on Stop ---
     stopBtn.onclick = () => {
-        if (socket) socket.close();
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            statusEl.textContent = "Status: Finalizing alignment targets...";
+            stopBtn.disabled = true;
+            
+            // Send EOF string token instead of closing directly
+            socket.send("EOF");
+        }
     }
 
     function cleanup() {
         startBtn.disabled = false;
         stopBtn.disabled = true;
 
-        if (processor) processor.disconnect();
-        if (audioContext) audioContext.close();
-        if (mediaStream) mediaStream.getTracks().forEach(track => track.stop());
+        if (processor) {
+            processor.disconnect();
+            processor = null;
+        }
+        if (audioContext) {
+            if (audioContext.state !== 'closed') audioContext.close();
+            audioContext = null;
+        }
+        if (mediaStream) {
+            mediaStream.getTracks().forEach(track => track.stop());
+            mediaStream = null;
+        }
     }
 </script>
 </body>
