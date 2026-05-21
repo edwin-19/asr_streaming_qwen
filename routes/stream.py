@@ -7,6 +7,7 @@ import librosa
 from typing import Dict
 from dataclasses import dataclass, field
 from fastapi import APIRouter, Request, HTTPException, Query, Depends
+from fastapi.concurrency import run_in_threadpool
 
 @dataclass
 class Session:
@@ -50,7 +51,8 @@ async def api_chunk(session_id: str = Query(...), request: Request = None, asr=D
     s.audio_buffer.append(wav)
     
     # Perform streaming inference
-    asr.streaming_transcribe(wav, s.state)
+    # asr.streaming_transcribe(wav, s.state)
+    await run_in_threadpool(asr.streaming_transcribe, wav, s.state)
     
     # Update language if detected during stream
     if hasattr(s.state, "language") and s.state.language:
@@ -68,7 +70,7 @@ async def api_finish(session_id: str = Query(...), asr=Depends(get_asr_model)):
         raise HTTPException(status_code=400, detail="Invalid session_id")
     
     # 1. Finalize ASR state to get total text
-    asr.finish_streaming_transcribe(s.state)
+    await run_in_threadpool(asr.finish_streaming_transcribe, s.state)
     final_text = getattr(s.state, "text", "")
 
     if not final_text or not s.audio_buffer:
@@ -84,7 +86,13 @@ async def api_finish(session_id: str = Query(...), asr=Depends(get_asr_model)):
     try:
         # We assume the streaming chunks are already 16k float32 
         # based on the api_chunk logic.
-        alignment_results = aligner.align(
+        # alignment_results = aligner.align(
+        #     audio=(full_audio, 16000), 
+        #     text=final_text, 
+        #     language=s.language
+        # )
+        alignment_results = await run_in_threadpool(
+            aligner.align, 
             audio=(full_audio, 16000), 
             text=final_text, 
             language=s.language

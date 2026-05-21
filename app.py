@@ -9,6 +9,14 @@ import torch
 from qwen_asr import Qwen3ASRModel
 from fastapi.responses import HTMLResponse
 import os
+import anyio
+
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+
+torch.set_num_threads(1)
+torch.set_num_interop_threads(1)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -16,7 +24,7 @@ async def lifespan(app: FastAPI):
     forced_aligner_path = os.getenv("FORCED_ALIGNER_PATH", "assets/Qwen3-ForcedAligner-0.6B")
     
     max_batch_size = int(os.getenv("ASR_MAX_BATCH_SIZE", "2"))
-    gpu_utilization = float(os.getenv("ASR_GPU_MEMORY_UTILIZATION", "0.8"))
+    gpu_utilization = float(os.getenv("ASR_GPU_MEMORY_UTILIZATION", "0.9"))
     max_model_len = int(os.getenv("ASR_MAX_MODEL_LEN", "8192"))
     device = os.getenv("ASR_DEVICE", "cuda:0")
     
@@ -36,6 +44,9 @@ async def lifespan(app: FastAPI):
     app.state.unfixed_chunk_num = int(os.getenv("ASR_UNFIXED_CHUNK_NUM", "4"))
     app.state.unfixed_token_num = int(os.getenv("ASR_UNFIXED_TOKEN_NUM", "5"))
     app.state.chunk_size_sec = float(os.getenv("ASR_CHUNK_SIZE_SEC", "1.0"))
+    
+    limiter = anyio.to_thread.current_default_thread_limiter()
+    limiter.total_threads = 4
     
     yield
     # SHUTDOWN: Clean up vLLM
